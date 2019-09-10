@@ -18,3 +18,17 @@ fn main() {}
 pub fn add(l: i32, r: i32) -> i32 {
     l + r
 }
+
+#[no_mangle]
+pub fn sub(l: i32, r: i32) -> i32 {
+    l - r
+}
+
+#[no_mangle]
+pub fn benchmark(iter: i32) -> i32 {
+    let mut ret = 0;
+    for x in 0..iter {
+        ret = add(ret, sub(iter, x));
+    }
+    ret
+}

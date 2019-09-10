@@ -123,7 +123,7 @@ mod tests {
 
         // And, finally, invoke our function and print the results.
         // For this demo, all we're doing is adding 5 and 7 together.
-        let args = [RuntimeValue::I32(5), RuntimeValue::I32(7)];
-        b.iter(|| context.invoke(&mut instance, "add", &args));
+        let args = [RuntimeValue::I32(1000000000)];
+        b.iter(|| context.invoke(&mut instance, "benchmark", &args));
     }
 }
