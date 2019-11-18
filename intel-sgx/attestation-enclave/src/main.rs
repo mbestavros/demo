@@ -8,7 +8,12 @@ use mbedtls::{
 };
 use serde_json::{from_reader, to_writer, Deserializer};
 use sgx_isa::Report;
-use std::{error::Error, io::Cursor, net::TcpListener};
+use std::{convert::TryInto, error::Error, io::Cursor, net::TcpListener};
+
+// Wasmtime dependencies.
+use cranelift_codegen::settings;
+use cranelift_native;
+use wasmtime_jit::{ActionError, ActionOutcome, Context, RuntimeValue};
 
 const DAEMON_LISTENER_ADDR: &'static str = "localhost:1032";
 const TENANT_LISTENER_ADDR: &'static str = "localhost:1066";
@@ -117,10 +122,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ad = iterator.next().unwrap()?;
         let iv1 = iterator.next().unwrap()?;
         let iv2 = iterator.next().unwrap()?;
+        let iv_bin = iterator.next().unwrap()?;
         let tag1 = iterator.next().unwrap()?;
         let tag2 = iterator.next().unwrap()?;
+        let tag_bin = iterator.next().unwrap()?;
         let ciphertext1 = iterator.next().unwrap()?;
         let ciphertext2 = iterator.next().unwrap()?;
+        let ciphertext_bin = iterator.next().unwrap()?;
 
         // The enclave generates a shared secret with the tenant. A SHA256 hash of this shared secret
         // is used as the symmetric key for encryption and decryption of data.
@@ -137,6 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // TODO: Can the same cipher instance be used for these? Cipher doesn't implement clone().
         let decrypt_cipher_1 = new_aes256gcm_decrypt_cipher(&symm_key, &iv1)?;
         let decrypt_cipher_2 = new_aes256gcm_decrypt_cipher(&symm_key, &iv2)?;
+        let decrypt_cipher_bin = new_aes256gcm_decrypt_cipher(&symm_key, &iv_bin)?;
 
         let mut entropy = Rdseed;
         let mut rng = CtrDrbg::new(&mut entropy, None)?;
@@ -147,16 +156,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         // The values received from the tenant are decrypted.
         let mut plaintext1 = [0u8; 32];
         let mut plaintext2 = [0u8; 32];
+        let mut plaintext_bin = [0u8; 32];
         let _ = decrypt_cipher_1.decrypt_auth(&ad, &ciphertext1, &mut plaintext1, &tag1)?;
         let _ = decrypt_cipher_2.decrypt_auth(&ad, &ciphertext2, &mut plaintext2, &tag2)?;
+        let _ = decrypt_cipher_bin.decrypt_auth(&ad, &ciphertext_bin, &mut plaintext_bin, &tag_bin)?;
 
         // The values received from the tenant are converted back to 32-bit unsigned ints.
         let num1 = Cursor::new(plaintext1).read_u32::<NativeEndian>()?;
         let num2 = Cursor::new(plaintext2).read_u32::<NativeEndian>()?;
 
         // The sum of the two plaintext values is calculated.
-        let sum: u32 = num1 + num2;
-        println!("\n{} + {} = {}", num1, num2, sum);
+        //let sum: u32 = num1 + num2;
+        //println!("\n{} + {} = {}", num1, num2, sum);
+
+        // Execute the WASM binary.
+        let result = wasm_add_full(&plaintext_bin, num1, num2);
+        let mut sum: u32;
+        match result.unwrap() {
+            ActionOutcome::Returned { values } => sum = values[0].unwrap_i32().try_into().unwrap(),
+            ActionOutcome::Trapped { message } => println!("Trap from within function: {}", message),
+        }
 
         // The sum is converted from u32 to bytes to serve as input for the encryption function.
         // The extra 5th byte is in case of overflow.
@@ -180,4 +199,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+// A function to encapsulate the full setup and execution of a single iteration of the WASM demo.
+pub fn wasm_add_full(binary: &[u8], arg1: u32, arg2: u32) -> Result<ActionOutcome, ActionError> {
+    // In order to run this binary, we need to prepare a few inputs.
+    // First, we need a Wasmtime context. To build one, we need to get an ISA
+    // from `cranelift_native.
+    let isa_builder = cranelift_native::builder().unwrap();
+    let flag_builder = settings::builder();
+    let isa = isa_builder.finish(settings::Flags::new(flag_builder));
+
+    // Then, we use the ISA to build the context.
+    let mut context = Context::with_isa(isa);
+
+    // Now, we instantiate the WASM module loaded into memory.
+    let mut instance = context.instantiate_module(None, &binary).unwrap();
+
+    // And, finally, invoke our function and print the results.
+    // For this demo, all we're doing is adding 5 and 7 together.
+    let args = [RuntimeValue::I32(arg1.try_into().unwrap()), RuntimeValue::I32(arg2.try_into().unwrap())];
+    context.invoke(&mut instance, "add", &args)
 }

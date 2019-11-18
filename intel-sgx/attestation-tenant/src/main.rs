@@ -11,7 +11,7 @@ use openssl::{
     x509::*,
 };
 use serde_json::{from_reader, to_writer, Deserializer};
-use std::{borrow::Borrow, convert::TryFrom, env, error::Error, fs, io::Cursor, net::TcpStream};
+use std::{borrow::Borrow, convert::TryFrom, env, error::Error, fs, io::Cursor, io::Read, net::TcpStream, process::Command};
 
 const DAEMON_CONN: &'static str = "localhost:1034";
 const ENCL_CONN: &'static str = "localhost:1066";
@@ -49,6 +49,49 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(3)
         .expect("You must supply two integers.")
         .parse::<u32>()?;
+
+    // The WebAssembly binary transmitted to the enclave is compiled here, on the tenant.
+    // The source language for the binary can be selected via feature.
+    //let out = std::env::var("OUT_DIR").unwrap();
+
+    if cfg!(feature = "c") {
+        println!("Compiling C source to WASM...");
+        let cc = std::env::var("CC").unwrap_or("clang".to_owned());
+        assert!(Command::new(cc)
+            .arg("-o")
+            .arg(format!("./add.wasm"))
+            .arg("--target=wasm32")
+            .arg("-Wl,--export-all")
+            .arg("-Wl,--no-entry")
+            .arg("-nostdlib")
+            .arg("-O3")
+            .arg("src/add.c")
+            .status()
+            .expect("failed to compile WASM module")
+            .success());
+    }
+
+    if cfg!(feature = "rust") {
+        println!("Compiling Rust source to WASM...");
+        assert!(Command::new("rustc")
+            .arg("-C")
+            .arg("lto")
+            .arg("-C")
+            .arg("opt-level=3")
+            .arg("--target")
+            .arg("wasm32-unknown-unknown")
+            .arg("-o")
+            .arg(format!("./add.wasm"))
+            .arg("src/add.rs")
+            .status()
+            .expect("failed to compile WASM module")
+            .success());
+    }
+    
+    // Once compiled, the WASM binary is loaded into the `binary` variable, for use later.
+    let mut binary_file = fs::File::open("./add.wasm").unwrap();
+    let mut binary: Vec<u8> = Vec::new();
+    binary_file.read_to_end(&mut binary).unwrap();
 
     // The tenant requests attestation from the platform's attestation daemon.
     let mut daemon_conn = TcpStream::connect(DAEMON_CONN)?;
@@ -139,6 +182,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     rand_bytes(&mut iv1)?;
     let mut iv2 = [0u8; 16];
     rand_bytes(&mut iv2)?;
+    let mut iv_bin = [0u8; 16];
+    rand_bytes(&mut iv_bin)?;
 
     // The user data is converted from u32 to bytes to be input to the encryption function.
     let mut val1_as_bytes = [0u8; 4];
@@ -150,6 +195,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let aad = [0; 32];
     let mut tag1 = [0; 16];
     let mut tag2 = [0; 16];
+    let mut tag_bin = [0; 16];
     let ciphertext1 = encrypt_aead(
         Cipher::aes_256_gcm(),
         &symm_key,
@@ -166,6 +212,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         &val2_as_bytes,
         &mut tag2,
     )?;
+    let ciphertext_bin = encrypt_aead(
+        Cipher::aes_256_gcm(),
+        &symm_key,
+        Some(&iv_bin),
+        &aad,
+        &binary,
+        &mut tag_bin,
+    )?;
 
     // The tenant sends its pub key and encrypted data to the enclave, along with the ivs, tags, and additional
     // data for the ciphertext.
@@ -174,10 +228,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     to_writer(&mut encl_conn, &aad)?;
     to_writer(&mut encl_conn, &iv1)?;
     to_writer(&mut encl_conn, &iv2)?;
+    to_writer(&mut encl_conn, &iv_bin)?;
     to_writer(&mut encl_conn, &tag1)?;
     to_writer(&mut encl_conn, &tag2)?;
+    to_writer(&mut encl_conn, &tag_bin)?;
     to_writer(&mut encl_conn, &ciphertext1)?;
     to_writer(&mut encl_conn, &ciphertext2)?;
+    to_writer(&mut encl_conn, &ciphertext_bin)?;
     println!("CLIENT > SERVER: Tenant PubKey and Encrypted Data");
 
     // The tenant receives the tag, iv, additional data, and encrypted sum from the enclave.

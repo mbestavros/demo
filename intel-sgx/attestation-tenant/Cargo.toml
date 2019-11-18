@@ -19,3 +19,11 @@ branch = "upstream_bindgen"
 package = "mbedtls"
 default-features = false
 features = ["rdrand", "sgx"]
+
+[features]
+
+default = ["rust"]
+
+c = []
+rust = []
+benchmark = []

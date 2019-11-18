@@ -8,6 +8,12 @@ edition = "2018"
 serde_json = "1.0"
 byteorder = "1"
 
+# Wasmtime dependencies.
+cranelift-codegen = { version = "0.36.0", features = ["enable-serde"] }
+cranelift-native = "0.36.0"
+wasmtime-jit = { git = "https://github.com/CraneStation/wasmtime", package = "wasmtime-jit", rev = "b7d86af0ec6dc6c3d228728f1ce47d0a0033c05f" }
+wabt = "0.7"
+
 # The sgx-isa crate allows the use of Fortanix's data structures 
 # relating to SGX, ex. Report, TargetInfo. The sgxstd feature
 # should be enabled when using std::os::fortanix_sgx functionality,
